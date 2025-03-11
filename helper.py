@@ -812,8 +812,26 @@ def diagnostic_gcv(X, Qt, d, O, beta, r, sigma, lambda_range, n_iters = 20, b_it
             )
     return pd.DataFrame(all_diagnostics)
 
+def adj_hat(d, n, p, lam):
+    d_aug = list(d) + (p - min(n, p)) * [0]
+    d2 = np.array(d_aug) ** 2
+    s = np.sum(lam * d2 / (d2 + lam)) / p
+    return (s ** -1 - 1/lam) ** -1
+
+def eta_hat(d, n, p, lam):
+    return adj_hat(d, n, p, lam) + lam
+
 def full_r2_s2_est(y, Qt, d, O, lambda_range, n, p):
     print("update")
+
+    # comment me out later
+    # print("norm")
+    # for l in lambda_range:
+    #     print("lambda", l)
+    #     beta_vec = svd_ridge_soln(Qt, d, O, y, l)
+    #     print("norm", (beta_vec ** 2).sum())
+
+
     # factor = np.sqrt(np.sum(d ** 2) / p)
     # print(np.sum(d ** 2) / factor ** 2 / p)
     # print(factor)
@@ -1292,7 +1310,10 @@ def cond_cov(p, k, d_new, O):
 
     return spike_cov + tail_cov, spike_cov, tail_cov
 
-def alignment_bias(n, p, d, d_new, alphas, lam, r2):
+def alignment_bias(n, p, d, d_new, alphas, lam, r2, matcher = None):
+    if matcher is None:
+        matcher = lambda i: i
+
     k = len(alphas)
 
     assert len(d) == min(n, p)
@@ -1304,17 +1325,23 @@ def alignment_bias(n, p, d, d_new, alphas, lam, r2):
     # print(d_tail)
     # print("spectrum tail", d_tail)
     d_aug = np.array(list(d) + (max(n, p) - n) * [0])
-    alphas = np.zeros_like(alphas)
+    # alphas = np.zeros_like(alphas) # for using J_c
     
     unaligned_bias = (d_tail * lam ** 2 * np.sum((d_aug ** 2 + lam) ** (-2)) / p + np.sum(
         lam ** 2 * (d_aug[:k] **2 + lam) ** (-2) * (d_new2[:k] - d_tail)
     ) / p) * n * r2 # n is norm of unaligned beta
 
+    # print("debug")
+    # print(alphas)
+    # print(d_new[:k])
+    # print(d[:k])
+
     aligned_bias = sum(
         [
-            alphas[i] ** 2 * d_new[i] ** 2 * lam ** 2 * 1 / (d[i] ** 2 + lam) ** 2 for i in range(k)
+            alphas[i] ** 2 * d_new[i] ** 2 * lam ** 2 * 1 / (d[matcher(i)] ** 2 + lam) ** 2 for i in range(k)
         ]
     )
+    # print("aligned bias", aligned_bias)
     
     return unaligned_bias + aligned_bias, unaligned_bias, aligned_bias
 
@@ -1345,7 +1372,7 @@ def evaluate(model, criterion, test_inputs, test_targets):
 import torch
 import torch.nn as nn
 
-def train(model, criterion, optimizer, train_inputs, train_targets, test_inputs, test_targets, num_epochs):
+def train(model, criterion, optimizer, train_inputs, train_targets, test_inputs, test_targets, num_epochs,):
 
     train_losses, test_losses = [], []
     for epoch in range(num_epochs):
@@ -1370,11 +1397,11 @@ def train(model, criterion, optimizer, train_inputs, train_targets, test_inputs,
     print(loss.item(), test_loss)
     return train_losses, test_losses
 
-def oracle_risk(n, p, d, d_new, alphas, r2, s2, lam) :
+def oracle_risk(n, p, d, d_new, alphas, r2, s2, lam, matcher = None) :
 
     k = len(alphas)
 
-    biases = alignment_bias(n, p, d, d_new, alphas, lam, r2)
+    biases = alignment_bias(n, p, d, d_new, alphas, lam, r2, matcher = matcher)
     vars = alignment_var(n, p, d, d_new, k, lam, s2)
 
     # print(biases[0])
@@ -1382,7 +1409,7 @@ def oracle_risk(n, p, d, d_new, alphas, r2, s2, lam) :
     return (biases[0] + vars[0])
 
 
-def gcv_test_pipeline(X_train, y_train, X_test, y_test, lambdas, r, sigma, k, true_beta, n_iters = None, oracle_test = True):
+def gcv_test_pipeline(X_train, y_train, X_test, y_test, lambdas, r, sigma, k, true_beta, n_iters = None, oracle_test = True, matcher = None):
     n, p = X_train.shape
 
 
@@ -1439,7 +1466,7 @@ def gcv_test_pipeline(X_train, y_train, X_test, y_test, lambdas, r, sigma, k, tr
         
         X_pcr = (X_train @ O_train.T)[:, :k] # projection 
         pcr_coefs = np.linalg.pinv(X_pcr.T @ X_pcr) @ X_pcr.T @ y_train
-        # # print(f"PCR Coefs: {pcr_coefs}")
+        print(f"PCR Coefs: {pcr_coefs}")
 
         X_resid = (X_train @ O_train[k:n].T)
         beta_resid = np.linalg.pinv(X_resid.T @ X_resid) @ X_resid.T @ y_train
@@ -1474,10 +1501,11 @@ def gcv_test_pipeline(X_train, y_train, X_test, y_test, lambdas, r, sigma, k, tr
         #     y_resid, Qt_train, d_train_mod, O_train, np.logspace(0, 2.5, 6), n, p
         # )
         print(r2, s2)
+        print(pcr_coefs)
 
         new_gcv_risks = [
             # compute_mod_gcv(r2 ** 0.5, s2 ** 0.5, )
-            oracle_risk(n, p, d_train, d_test, pcr_coefs, r2, s2, l) / X_test.shape[0] for l in lambdas
+            oracle_risk(n, p, d_train, d_test, pcr_coefs, r2, s2, l, matcher = matcher) / X_test.shape[0] for l in lambdas
         ]
         # no such thing as an oracle value usually?
         # all_oracle_gcv_risks = [
